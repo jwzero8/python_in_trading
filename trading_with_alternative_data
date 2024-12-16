@@ -1,0 +1,316 @@
+"""NLTK, VADER, and TF-IDF are libraries for NLP tasks, including sentiment analysis and text representation.
+Tweepy is a library for accessing the Twitter API and scraping Twitter data.
+BeautifulSoup is a library for parsing HTML and XML documents and scraping data from websites.
+
+"""
+
+import numpy as np
+import pandas as pd
+import nltk
+from nltk.sentiment import SentimentIntensityAnalyzer
+from textblob import TextBlob
+import tweepy
+import yfinance as yf
+from datetime import datetime, timedelta
+import requests
+from bs4 import BeautifulSoup
+import re
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.ensemble import RandomForestClassifier
+from typing import List, Dict, Tuple
+import warnings
+warnings.filterwarnings('ignore')
+
+class NewsAnalyzer:
+    """News Data Collection and Analysis"""
+    def __init__(self):
+        self.sia = SentimentIntensityAnalyzer()
+        self.news_sources = {
+            'reuters': 'https://www.reuters.com/markets/companies',
+            'bloomberg': 'https://www.bloomberg.com/markets'
+        }
+        
+    def fetch_news(self, ticker: str) -> List[Dict]:
+        """Fetch news articles for a given ticker"""
+        news_data = []
+        
+        try:
+            # Using yfinance for news data
+            stock = yf.Ticker(ticker)
+            news = stock.news
+            
+            for article in news:
+                sentiment = self.analyze_sentiment(article['title'])
+                news_data.append({
+                    'date': datetime.fromtimestamp(article['providerPublishTime']),
+                    'title': article['title'],
+                    'link': article['link'],
+                    'source': article['publisher'],
+                    'sentiment': sentiment
+                })
+                
+        except Exception as e:
+            print(f"Error fetching news for {ticker}: {str(e)}")
+            
+        return news_data
+    
+    def analyze_sentiment(self, text: str) -> Dict:
+        """Analyze sentiment of text using multiple methods"""
+        # VADER sentiment
+        vader_sentiment = self.sia.polarity_scores(text)
+        
+        # TextBlob sentiment
+        blob = TextBlob(text)
+        textblob_sentiment = {
+            'polarity': blob.sentiment.polarity,
+            'subjectivity': blob.sentiment.subjectivity
+        }
+        
+        return {
+            'vader': vader_sentiment,
+            'textblob': textblob_sentiment
+        }
+    
+    def extract_keywords(self, text: str, n: int = 5) -> List[str]:
+        """Extract key terms from text"""
+        vectorizer = TfidfVectorizer(stop_words='english')
+        try:
+            tfidf_matrix = vectorizer.fit_transform([text])
+            feature_array = np.array(vectorizer.get_feature_names_out())
+            tfidf_sorting = np.argsort(tfidf_matrix.toarray()).flatten()[::-1]
+            
+            return feature_array[tfidf_sorting][:n].tolist()
+        except:
+            return []
+
+class SocialMediaAnalyzer:
+    """Social Media Data Analysis"""
+    def __init__(self, twitter_credentials: Dict):
+        """Initialize with Twitter API credentials"""
+        auth = tweepy.OAuthHandler(
+            twitter_credentials['consumer_key'],
+            twitter_credentials['consumer_secret']
+        )
+        auth.set_access_token(
+            twitter_credentials['access_token'],
+            twitter_credentials['access_token_secret']
+        )
+        self.api = tweepy.API(auth)
+        self.sia = SentimentIntensityAnalyzer()
+        
+    def get_twitter_sentiment(self, query: str, count: int = 100) -> Dict:
+        """Analyze Twitter sentiment for a query"""
+        tweets = []
+        sentiments = []
+        
+        try:
+            for tweet in tweepy.Cursor(self.api.search_tweets, q=query, 
+                                     lang="en").items(count):
+                tweets.append(tweet.text)
+                sentiments.append(self.sia.polarity_scores(tweet.text))
+                
+        except Exception as e:
+            print(f"Error fetching tweets: {str(e)}")
+            
+        return {
+            'tweets': tweets,
+            'sentiments': sentiments,
+            'aggregate_sentiment': self._aggregate_sentiments(sentiments)
+        }
+    
+    def _aggregate_sentiments(self, sentiments: List[Dict]) -> Dict:
+        """Aggregate sentiment scores"""
+        if not sentiments:
+            return {}
+            
+        return {
+            'compound': np.mean([s['compound'] for s in sentiments]),
+            'positive': np.mean([s['pos'] for s in sentiments]),
+            'negative': np.mean([s['neg'] for s in sentiments]),
+            'neutral': np.mean([s['neu'] for s in sentiments])
+        }
+
+class AlternativeDataAnalyzer:
+    """Alternative Data Analysis"""
+    def __init__(self):
+        self.data_sources = {}
+        
+    def analyze_satellite_data(self, location: str, 
+                             date_range: Tuple[datetime, datetime]) -> Dict:
+        """Analyze satellite imagery data (simplified simulation)"""
+        # Simulate satellite data analysis
+        num_days = (date_range[1] - date_range[0]).days
+        
+        return {
+            'parking_lot_occupancy': np.random.uniform(0.3, 0.9, num_days),
+            'building_activity': np.random.uniform(0.2, 0.8, num_days),
+            'shipping_activity': np.random.uniform(0.4, 0.95, num_days)
+        }
+    
+    def analyze_weather_impact(self, location: str, 
+                             date_range: Tuple[datetime, datetime]) -> Dict:
+        """Analyze weather data impact"""
+        # Simulate weather data analysis
+        num_days = (date_range[1] - date_range[0]).days
+        
+        return {
+            'temperature': np.random.normal(20, 5, num_days),
+            'precipitation': np.random.exponential(2, num_days),
+            'severe_weather_events': np.random.poisson(0.1, num_days)
+        }
+
+class SentimentBasedTrader:
+    """Trading Strategy Based on Sentiment Analysis"""
+    def __init__(self, initial_capital: float = 100000):
+        self.capital = initial_capital
+        self.positions = {}
+        self.news_analyzer = NewsAnalyzer()
+        self.sentiment_threshold = 0.2
+        self.position_size = 0.1  # 10% of capital per position
+        
+    def generate_signals(self, ticker: str) -> Dict:
+        """Generate trading signals based on sentiment"""
+        # Collect news sentiment
+        news_data = self.news_analyzer.fetch_news(ticker)
+        
+        if not news_data:
+            return {'signal': 'HOLD', 'confidence': 0}
+            
+        # Aggregate sentiments
+        sentiments = [
+            article['sentiment']['vader']['compound'] 
+            for article in news_data
+        ]
+        
+        avg_sentiment = np.mean(sentiments)
+        sentiment_std = np.std(sentiments)
+        
+        # Generate signals
+        if avg_sentiment > self.sentiment_threshold:
+            signal = 'BUY'
+            confidence = min(abs(avg_sentiment), 1.0)
+        elif avg_sentiment < -self.sentiment_threshold:
+            signal = 'SELL'
+            confidence = min(abs(avg_sentiment), 1.0)
+        else:
+            signal = 'HOLD'
+            confidence = 0
+            
+        return {
+            'signal': signal,
+            'confidence': confidence,
+            'avg_sentiment': avg_sentiment,
+            'sentiment_std': sentiment_std
+        }
+    
+    def execute_trade(self, ticker: str, price: float):
+        """Execute trade based on sentiment signals"""
+        signals = self.generate_signals(ticker)
+        
+        if signals['signal'] == 'BUY' and ticker not in self.positions:
+            position_size = self.capital * self.position_size * signals['confidence']
+            shares = position_size / price
+            self.positions[ticker] = {
+                'shares': shares,
+                'entry_price': price,
+                'sentiment_score': signals['avg_sentiment']
+            }
+            self.capital -= position_size
+            
+        elif signals['signal'] == 'SELL' and ticker in self.positions:
+            position = self.positions[ticker]
+            sale_proceeds = position['shares'] * price
+            self.capital += sale_proceeds
+            del self.positions[ticker]
+
+class AlternativeDataStrategy:
+    """Trading Strategy Using Alternative Data"""
+    def __init__(self):
+        self.news_analyzer = NewsAnalyzer()
+        self.social_analyzer = SocialMediaAnalyzer({
+            'consumer_key': 'your_key',
+            'consumer_secret': 'your_secret',
+            'access_token': 'your_token',
+            'access_token_secret': 'your_token_secret'
+        })
+        self.alt_data_analyzer = AlternativeDataAnalyzer()
+        
+    def generate_combined_signal(self, ticker: str, 
+                               location: str) -> Dict:
+        """Generate trading signal combining multiple data sources"""
+        # Get news sentiment
+        news_data = self.news_analyzer.fetch_news(ticker)
+        news_sentiment = np.mean([
+            article['sentiment']['vader']['compound'] 
+            for article in news_data
+        ]) if news_data else 0
+        
+        # Get social media sentiment (commented out due to API requirements)
+        # social_sentiment = self.social_analyzer.get_twitter_sentiment(ticker)
+        # social_score = social_sentiment['aggregate_sentiment']['compound']
+        social_score = 0  # Placeholder
+        
+        # Get alternative data signals
+        sat_data = self.alt_data_analyzer.analyze_satellite_data(
+            location, 
+            (datetime.now() - timedelta(days=30), datetime.now())
+        )
+        
+        # Combine signals
+        combined_score = (
+            0.4 * news_sentiment +
+            0.3 * social_score +
+            0.3 * np.mean(sat_data['parking_lot_occupancy'])
+        )
+        
+        return {
+            'signal': 'BUY' if combined_score > 0.2 else 'SELL' if combined_score < -0.2 else 'HOLD',
+            'score': combined_score,
+            'components': {
+                'news': news_sentiment,
+                'social': social_score,
+                'satellite': np.mean(sat_data['parking_lot_occupancy'])
+            }
+        }
+
+def main():
+    # Initialize analyzers
+    news_analyzer = NewsAnalyzer()
+    alt_data_analyzer = AlternativeDataAnalyzer()
+    trader = SentimentBasedTrader()
+    
+    # Example usage
+    ticker = 'AAPL'
+    
+    print("\nAnalyzing data for", ticker)
+    print("-" * 50)
+    
+    # Analyze news
+    news_data = news_analyzer.fetch_news(ticker)
+    if news_data:
+        print("\nRecent News Sentiment:")
+        for article in news_data[:3]:
+            print(f"Title: {article['title']}")
+            print(f"Sentiment: {article['sentiment']['vader']['compound']:.3f}")
+            print("-" * 30)
+    
+    # Generate trading signals
+    signals = trader.generate_signals(ticker)
+    print("\nTrading Signals:")
+    print(f"Signal: {signals['signal']}")
+    print(f"Confidence: {signals['confidence']:.3f}")
+    
+    # Alternative data analysis
+    location = "California"
+    date_range = (datetime.now() - timedelta(days=30), datetime.now())
+    
+    sat_data = alt_data_analyzer.analyze_satellite_data(location, date_range)
+    weather_data = alt_data_analyzer.analyze_weather_impact(location, date_range)
+    
+    print("\nAlternative Data Metrics:")
+    print(f"Avg Parking Lot Occupancy: {np.mean(sat_data['parking_lot_occupancy']):.2f}")
+    print(f"Avg Building Activity: {np.mean(sat_data['building_activity']):.2f}")
+    print(f"Avg Temperature: {np.mean(weather_data['temperature']):.1f}°C")
+
+if __name__ == "__main__":
+    main()
