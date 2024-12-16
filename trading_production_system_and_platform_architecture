@@ -1,0 +1,327 @@
+"""Remember to throw Exception and Logging when it comes to production-level code"""
+
+
+
+import logging
+import time
+import threading
+import queue
+import redis
+import json
+import pandas as pd
+import numpy as np
+from typing import Dict, List, Any, Optional
+from datetime import datetime
+from abc import ABC, abstractmethod
+import psycopg2
+from sqlalchemy import create_engine
+import pymongo
+from fastapi import FastAPI, HTTPException
+import uvicorn
+import asyncio
+import websockets
+import yaml
+import prometheus_client as prom
+
+# Metrics for monitoring
+TRADE_COUNTER = prom.Counter('trades_total', 'Total number of trades executed')
+LATENCY_HISTOGRAM = prom.Histogram('trade_latency_seconds', 'Trade execution latency')
+POSITION_GAUGE = prom.Gauge('current_positions', 'Current number of open positions')
+
+class TradingSystem:
+    """Main Trading System Class"""
+    def __init__(self, config_path: str):
+        self.load_config(config_path)
+        self.setup_logging()
+        self.initialize_components()
+        
+    def load_config(self, config_path: str):
+        """Load system configuration"""
+        with open(config_path, 'r') as file:
+            self.config = yaml.safe_load(file)
+            
+    def setup_logging(self):
+        """Configure logging"""
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler('trading_system.log'),
+                logging.StreamHandler()
+            ]
+        )
+        self.logger = logging.getLogger(__name__)
+        
+    def initialize_components(self):
+        """Initialize system components"""
+        self.market_data_handler = MarketDataHandler()
+        self.risk_manager = RiskManager(self.config['risk'])
+        self.order_manager = OrderManager()
+        self.position_manager = PositionManager()
+        self.database = DatabaseManager(self.config['database'])
+        self.strategy_engine = StrategyEngine()
+
+class MarketDataHandler:
+    """Handle real-time market data"""
+    def __init__(self):
+        self.subscribers = []
+        self.data_queue = queue.Queue()
+        self.running = False
+        
+    async def connect_to_feed(self, url: str):
+        """Connect to market data websocket"""
+        async with websockets.connect(url) as websocket:
+            while self.running:
+                try:
+                    data = await websocket.recv()
+                    self.process_data(json.loads(data))
+                except Exception as e:
+                    logging.error(f"Market data error: {str(e)}")
+                    
+    def process_data(self, data: Dict):
+        """Process incoming market data"""
+        self.data_queue.put(data)
+        for subscriber in self.subscribers:
+            subscriber.on_market_data(data)
+            
+    def start(self):
+        """Start market data handling"""
+        self.running = True
+        self.thread = threading.Thread(target=self._run)
+        self.thread.start()
+        
+    def _run(self):
+        """Main market data processing loop"""
+        while self.running:
+            try:
+                data = self.data_queue.get(timeout=1)
+                self.process_data(data)
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logging.error(f"Error processing market data: {str(e)}")
+
+class RiskManager:
+    """Manage trading risk"""
+    def __init__(self, config: Dict):
+        self.max_position_size = config['max_position_size']
+        self.max_drawdown = config['max_drawdown']
+        self.position_limits = config['position_limits']
+        
+    def check_order(self, order: Dict) -> bool:
+        """Check if order passes risk checks"""
+        try:
+            # Position limit check
+            if not self._check_position_limit(order):
+                return False
+                
+            # Drawdown check
+            if not self._check_drawdown(order):
+                return False
+                
+            # Value at Risk check
+            if not self._check_var(order):
+                return False
+                
+            return True
+            
+        except Exception as e:
+            logging.error(f"Risk check error: {str(e)}")
+            return False
+            
+    def _check_position_limit(self, order: Dict) -> bool:
+        """Check position limits"""
+        return order['quantity'] <= self.max_position_size
+        
+    def _check_drawdown(self, order: Dict) -> bool:
+        """Check maximum drawdown"""
+        return True  # Implement actual drawdown calculation
+        
+    def _check_var(self, order: Dict) -> bool:
+        """Check Value at Risk"""
+        return True  # Implement VaR calculation
+
+class OrderManager:
+    """Manage order execution"""
+    def __init__(self):
+        self.orders = {}
+        self.redis_client = redis.Redis(host='localhost', port=6379, db=0)
+        
+    @LATENCY_HISTOGRAM.time()
+    def submit_order(self, order: Dict):
+        """Submit new order"""
+        try:
+            order_id = str(int(time.time() * 1000))
+            order['order_id'] = order_id
+            order['status'] = 'PENDING'
+            
+            # Store order in Redis
+            self.redis_client.hset(
+                'orders',
+                order_id,
+                json.dumps(order)
+            )
+            
+            # Execute order
+            self._execute_order(order)
+            TRADE_COUNTER.inc()
+            
+            return order_id
+            
+        except Exception as e:
+            logging.error(f"Order submission error: {str(e)}")
+            raise
+            
+    def _execute_order(self, order: Dict):
+        """Execute order logic"""
+        # Implement actual order execution
+        order['status'] = 'EXECUTED'
+        self.redis_client.hset(
+            'orders',
+            order['order_id'],
+            json.dumps(order)
+        )
+
+class PositionManager:
+    """Manage trading positions"""
+    def __init__(self):
+        self.positions = {}
+        self.mongo_client = pymongo.MongoClient("mongodb://localhost:27017/")
+        self.db = self.mongo_client['trading']
+        self.positions_collection = self.db['positions']
+        
+    def update_position(self, trade: Dict):
+        """Update position based on trade"""
+        symbol = trade['symbol']
+        
+        if symbol not in self.positions:
+            self.positions[symbol] = {
+                'quantity': 0,
+                'average_price': 0
+            }
+            
+        position = self.positions[symbol]
+        
+        # Update position
+        if trade['side'] == 'BUY':
+            position['quantity'] += trade['quantity']
+        else:
+            position['quantity'] -= trade['quantity']
+            
+        # Update average price
+        position['average_price'] = self._calculate_average_price(
+            position, trade
+        )
+        
+        # Store in MongoDB
+        self.positions_collection.update_one(
+            {'symbol': symbol},
+            {'$set': position},
+            upsert=True
+        )
+        
+        POSITION_GAUGE.set(len(self.positions))
+        
+    def _calculate_average_price(self, position: Dict, trade: Dict) -> float:
+        """Calculate new average price"""
+        return (position['average_price'] * position['quantity'] + 
+                trade['price'] * trade['quantity']) / (
+                position['quantity'] + trade['quantity']
+                )
+
+class DatabaseManager:
+    """Manage database operations"""
+    def __init__(self, config: Dict):
+        self.config = config
+        self.engine = create_engine(self.config['url'])
+        self.redis_client = redis.Redis(host='localhost', port=6379, db=0)
+        
+    def store_trade(self, trade: Dict):
+        """Store trade in database"""
+        try:
+            # Store in PostgreSQL
+            df = pd.DataFrame([trade])
+            df.to_sql('trades', self.engine, if_exists='append', index=False)
+            
+            # Cache in Redis
+            self.redis_client.hset(
+                f"trade:{trade['trade_id']}",
+                mapping=trade
+            )
+            
+        except Exception as e:
+            logging.error(f"Database error: {str(e)}")
+            raise
+
+class Strategy(ABC):
+    """Abstract base class for trading strategies"""
+    @abstractmethod
+    def generate_signal(self, data: Dict) -> Dict:
+        """Generate trading signal"""
+        pass
+
+class StrategyEngine:
+    """Manage trading strategies"""
+    def __init__(self):
+        self.strategies = {}
+        self.active_strategies = set()
+        
+    def add_strategy(self, name: str, strategy: Strategy):
+        """Add new strategy"""
+        self.strategies[name] = strategy
+        
+    def activate_strategy(self, name: str):
+        """Activate strategy"""
+        if name in self.strategies:
+            self.active_strategies.add(name)
+            
+    def deactivate_strategy(self, name: str):
+        """Deactivate strategy"""
+        self.active_strategies.discard(name)
+        
+    def process_data(self, data: Dict):
+        """Process data through active strategies"""
+        signals = []
+        for strategy_name in self.active_strategies:
+            strategy = self.strategies[strategy_name]
+            signal = strategy.generate_signal(data)
+            signals.append(signal)
+        return signals
+
+# API Service
+app = FastAPI()
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "healthy"}
+
+@app.get("/metrics")
+async def metrics():
+    """Prometheus metrics endpoint"""
+    return prom.generate_latest()
+
+@app.post("/orders")
+async def create_order(order: Dict):
+    """Create new order"""
+    try:
+        order_manager = OrderManager()
+        order_id = order_manager.submit_order(order)
+        return {"order_id": order_id}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+def main():
+    """Main function to run the trading system"""
+    # Load configuration
+    config_path = "config.yaml"
+    trading_system = TradingSystem(config_path)
+    
+    # Start components
+    trading_system.market_data_handler.start()
+    
+    # Start API server
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+if __name__ == "__main__":
+    main()
